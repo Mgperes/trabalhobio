@@ -4,9 +4,15 @@ import random
 from mesa import Agent, Model
 from mesa.datacollection import DataCollector
 from mesa.space import SingleGrid
-from mesa.time import RandomActivation
-from mesa.visualization.ModularVisualization import ModularServer
-from mesa.visualization.modules import CanvasGrid, ChartModule, TextElement
+
+try:
+    from mesa.visualization.ModularVisualization import ModularServer
+    from mesa.visualization.modules import CanvasGrid, ChartModule, TextElement
+except ImportError:
+    ModularServer = None
+    CanvasGrid = None
+    ChartModule = None
+    TextElement = None
 
 # Configuracoes
 LARGURA = 40
@@ -35,7 +41,7 @@ TIPOS = {
 
 class AgenteMultidao(Agent):
     def __init__(self, model, goal_x, goal_y, tipo):
-        super().__init__(model.next_id(), model)
+        super().__init__(model)
         self.goal_x = goal_x
         self.goal_y = goal_y
         self.tipo = tipo
@@ -43,7 +49,7 @@ class AgenteMultidao(Agent):
         self.caminho = []
 
     def _esta_no_destino(self):
-        return self.pos[0] >= self.model.largura - 2
+        return self.pos == (self.goal_x, self.goal_y)
 
     def _pode_mover_neste_tick(self):
         # Agentes lentos andam em metade dos ticks para criar diferenca de velocidade.
@@ -67,7 +73,7 @@ class AgenteMultidao(Agent):
             )
             ocupacao = sum(1 for p in ao_redor if not self.model.grid.is_cell_empty(p))
             dist_destino = math.hypot(self.goal_x - pos[0], self.goal_y - pos[1])
-            score = dist_destino + 0.35 * ocupacao
+            score = dist_destino + 0.9 * ocupacao
             candidatos.append((score, random.random(), pos))
 
         if not candidatos:
@@ -119,16 +125,18 @@ class BiocrowdsModel(Model):
         self.num_agentes = num_agentes
         self.max_passos = max_passos
         self.passo_atual = 0
+        self.running = True
+        self.centro_x = self.largura // 2
+        self.centro_y = self.altura // 2
 
         self.grid = SingleGrid(self.largura, self.altura, torus=False)
-        self.schedule = RandomActivation(self)
 
         tipos_lista = ["rapido", "normal", "lento"]
         for i in range(self.num_agentes):
             tipo = tipos_lista[i % 3]
-            x, y = self._posicao_livre_origem()
-            gx = random.randint(self.largura - 5, self.largura - 1)
-            gy = random.randint(1, self.altura - 2)
+            x, y = self._posicao_livre_canto(i)
+            gx = random.randint(max(1, self.centro_x - 2), min(self.largura - 2, self.centro_x + 2))
+            gy = random.randint(max(1, self.centro_y - 2), min(self.altura - 2, self.centro_y + 2))
 
             agente = AgenteMultidao(
                 model=self,
@@ -138,7 +146,6 @@ class BiocrowdsModel(Model):
             )
             self.grid.place_agent(agente, (x, y))
             agente.caminho.append((x, y))
-            self.schedule.add(agente)
 
         self.datacollector = DataCollector(
             model_reporters={
@@ -158,12 +165,21 @@ class BiocrowdsModel(Model):
 
     @property
     def chegados(self):
-        return sum(1 for a in self.schedule.agents if a.chegou)
+        return sum(1 for a in self.agents if a.chegou)
 
-    def _posicao_livre_origem(self):
+    def _posicao_livre_canto(self, indice):
+        regioes = [
+            (0, min(4, self.largura - 1), 0, min(4, self.altura - 1)),
+            (max(0, self.largura - 5), self.largura - 1, 0, min(4, self.altura - 1)),
+            (0, min(4, self.largura - 1), max(0, self.altura - 5), self.altura - 1),
+            (max(0, self.largura - 5), self.largura - 1, max(0, self.altura - 5), self.altura - 1),
+        ]
+
+        x_min, x_max, y_min, y_max = regioes[indice % len(regioes)]
+
         for _ in range(500):
-            x = random.randint(0, 4)
-            y = random.randint(1, self.altura - 2)
+            x = random.randint(x_min, x_max)
+            y = random.randint(y_min, y_max)
             if self.grid.is_cell_empty((x, y)):
                 return x, y
 
@@ -179,7 +195,7 @@ class BiocrowdsModel(Model):
             self.running = False
             return
 
-        self.schedule.step()
+        self.agents.shuffle_do("step")
         self.passo_atual += 1
         self.datacollector.collect(self)
 
@@ -204,16 +220,21 @@ def agente_portrayal(agent):
     }
 
 
-class StatusElement(TextElement):
-    def render(self, model):
-        return (
-            f"Passo: {model.passo_atual}/{model.max_passos} | "
-            f"Chegados: {model.chegados}/{model.num_agentes} "
-            f"({model.chegou_percentual:.1f}%)"
-        )
+if TextElement is not None:
+
+    class StatusElement(TextElement):
+        def render(self, model):
+            return (
+                f"Passo: {model.passo_atual}/{model.max_passos} | "
+                f"Chegados: {model.chegados}/{model.num_agentes} "
+                f"({model.chegou_percentual:.1f}%)"
+            )
 
 
 def criar_servidor():
+    if ModularServer is None:
+        return None
+
     canvas = CanvasGrid(agente_portrayal, LARGURA, ALTURA, 780, 780)
     status = StatusElement()
     chart = ChartModule(
@@ -242,5 +263,17 @@ def criar_servidor():
 
 
 if __name__ == "__main__":
-    print("Abrindo visualizacao Mesa em http://127.0.0.1:8521")
-    criar_servidor().launch()
+    servidor = criar_servidor()
+
+    if servidor is None:
+        modelo = BiocrowdsModel()
+        while modelo.running:
+            modelo.step()
+
+        print(
+            f"Mesa 3.x detectado sem ModularServer. Simulacao concluida: "
+            f"{modelo.chegados}/{modelo.num_agentes} agentes em {modelo.passo_atual} passos."
+        )
+    else:
+        print("Abrindo visualizacao Mesa em http://127.0.0.1:8521")
+        servidor.launch()
